@@ -17,8 +17,11 @@ import glide.api.models.exceptions.ClosingException;
 import glide.api.models.exceptions.ConnectionException;
 import glide.api.models.exceptions.TimeoutException;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -97,7 +100,8 @@ public class ClusterExample {
 
         while (true) {
             try (GlideClusterClient client = createClient(nodeList)) {
-                appLogic(client);
+                // appLogic(client);
+                performanceTest(client);
                 return;
             } catch (CancellationException e) {
                 log(ERROR, "glide", "Request cancelled: " + e.getMessage());
@@ -133,6 +137,106 @@ public class ClusterExample {
             }
         }
     }
+
+    public static void performanceTest(GlideClusterClient client) throws ExecutionException, InterruptedException {
+        int operationsPerBatch = 500; // Number of operations per batch
+        int numberOfBatches = 50000;   // Number of batches
+        int keySize = 64;             // Key size in bytes
+        int totalOperations = numberOfBatches * operationsPerBatch;
+        
+        // Generate keys of the specified size
+        List<String> keys = new ArrayList<>(operationsPerBatch);
+        String baseKey = "A"; // Start with a single character and pad to the required size
+        for (int i = 0; i < operationsPerBatch; i++) {
+            String key = generateKey(baseKey, keySize, i);
+            keys.add(key);
+        }
+    
+        String baseField = "field:";
+        List<String> fields = new ArrayList<>(operationsPerBatch);
+        List<String> values = new ArrayList<>(operationsPerBatch);
+        for (int i = 0; i < operationsPerBatch; i++) {
+            fields.add(baseField + i);
+            values.add("testValue:" + i);
+        }
+    
+        List<Double> hsetTimes = new ArrayList<>();
+        List<Double> hgetTimes = new ArrayList<>();
+    
+        // Run a fixed number of batches
+        for (int batch = 0; batch < numberOfBatches; batch++) {
+            // HSET performance
+            long start = System.nanoTime();
+            List<CompletableFuture<Long>> hsetFutures = new ArrayList<>();
+            for (int i = 0; i < operationsPerBatch; i++) {
+                Map<String, String> singleFieldMap = new HashMap<>();
+                singleFieldMap.put(fields.get(i), values.get(i));
+                hsetFutures.add(client.hset(keys.get(i), singleFieldMap));
+            }
+            CompletableFuture.allOf(hsetFutures.toArray(new CompletableFuture[0])).get();
+            long end = System.nanoTime();
+            double elapsedSec = (end - start) / 1_000_000_000.0;
+            double opsPerSec = operationsPerBatch / elapsedSec;
+            hsetTimes.add(opsPerSec);
+            System.out.println("Batch " + (batch + 1) + " HSET Performance: " 
+                + operationsPerBatch + " ops in " + elapsedSec + "s => " + opsPerSec + " ops/s");
+
+            // HGET performance
+            start = System.nanoTime();
+            List<CompletableFuture<String>> hgetFutures = new ArrayList<>();
+            for (int i = 0; i < operationsPerBatch; i++) {
+                hgetFutures.add(client.hget(keys.get(i), fields.get(i)));
+            }
+            CompletableFuture.allOf(hgetFutures.toArray(new CompletableFuture[0])).get();
+            end = System.nanoTime();
+            elapsedSec = (end - start) / 1_000_000_000.0;
+            opsPerSec = operationsPerBatch / elapsedSec;
+            hgetTimes.add(opsPerSec);
+            System.out.println("Batch " + (batch + 1) + " HGET Performance: " 
+                + operationsPerBatch + " ops in " + elapsedSec + "s => " + opsPerSec + " ops/s");
+        }
+    
+        // Mean calculations
+        double hsetMean = calculateMean(hsetTimes);
+        double hgetMean = calculateMean(hgetTimes);
+    
+        System.out.println("Mean HSET Ops/s over " + numberOfBatches 
+            + " batches with each batch having " + operationsPerBatch 
+            + " operations, totalling " + totalOperations 
+            + " is " + hsetMean);
+        System.out.println("Mean HGET Ops/s over " + numberOfBatches 
+            + " batches with each batch having " + operationsPerBatch 
+            + " operations, totalling " + totalOperations 
+            + " is " + hgetMean);
+
+        System.out.println("Performance test was completed with key size: " + keySize + " bytes");
+
+    }
+    
+    /**
+     * Helper method to generate a key of the specified size.
+     */
+    private static String generateKey(String baseKey, int size, int index) {
+        StringBuilder keyBuilder = new StringBuilder(baseKey);
+        while (keyBuilder.length() < size - Integer.toString(index).length()) {
+            keyBuilder.append("A"); // Pad with 'A'
+        }
+        keyBuilder.append(index); // Append index to ensure unique keys
+        return keyBuilder.toString();
+    }
+    
+    /**
+     * Helper method to calculate the mean of a list of doubles.
+     */
+    private static double calculateMean(List<Double> values) {
+        double sum = 0;
+        for (double value : values) {
+            sum += value;
+        }
+        return sum / values.size();
+    }
+    
+    
 
     /**
      * The entry point of the cluster example. This method sets up the logger configuration and
